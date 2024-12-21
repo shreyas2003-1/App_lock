@@ -1,0 +1,276 @@
+import os
+import cv2
+import pickle
+import face_recognition
+import pyttsx3
+import threading
+import logging
+import requests
+from kivy.app import App
+from kivy.uix.button import Button
+from kivy.uix.boxlayout import BoxLayout
+from kivy.uix.label import Label
+from kivy.uix.popup import Popup
+from kivy.uix.filechooser import FileChooserListView
+from cryptography.fernet import Fernet
+from telegram import Bot
+from telegram.error import TelegramError
+import asyncio
+from io import BytesIO
+
+# Suppress debug output from comtypes and TTS voice events
+logging.getLogger('comtypes').setLevel(logging.WARNING)
+
+# Initialize text-to-speech engine
+engine = pyttsx3.init()
+engine.setProperty('rate', 150)
+
+# Suppress the unimplemented method errors from pyttsx3
+engine._inSpeech = False
+
+# Load trained face encodings if available
+FACE_ENCODINGS_FILE = "face_encodings.pkl"
+if os.path.exists(FACE_ENCODINGS_FILE):
+    with open(FACE_ENCODINGS_FILE, "rb") as f:
+        known_face_encodings = pickle.load(f)
+else:
+    known_face_encodings = []
+
+# Key file for encryption and decryption
+KEY_FILE = "secret.key"
+
+# Your Telegram Bot Token and Chat ID (Replace with your actual bot token and chat ID)
+TELEGRAM_BOT_TOKEN = "7546980277:AAH3eG5jcnchvdqT7PYaCA-bH6tINzEojSs"
+CHAT_ID = "1868488937"
+
+# Initialize Telegram Bot
+bot = Bot(token=TELEGRAM_BOT_TOKEN)
+
+async def send_telegram_alert(message, image_path=None):
+    try:
+        if image_path:
+            with open(image_path, 'rb') as photo:
+                await bot.send_photo(chat_id=CHAT_ID, photo=photo, caption=message)
+        else:
+            await bot.send_message(chat_id=CHAT_ID, text=message)
+    except TelegramError as e:
+        logging.error(f"Error sending message to Telegram: {e}")
+        print(f"Error sending message to Telegram: {e}")
+
+def send_alert(message, image_path=None):
+    asyncio.run(send_telegram_alert(message, image_path))
+
+def load_or_generate_key():
+    try:
+        if os.path.exists(KEY_FILE):
+            with open(KEY_FILE, "rb") as key_file:
+                return key_file.read()
+        else:
+            key = Fernet.generate_key()
+            with open(KEY_FILE, "wb") as key_file:
+                key_file.write(key)
+            return key
+    except Exception as e:
+        logging.error(f"Error generating or loading key: {e}")
+        raise Exception("Error loading or generating encryption key.")
+
+class FaceLockApp(App):
+    def build(self):
+        self.layout = BoxLayout(orientation='vertical')
+
+        self.capture_button = Button(text="Capture Face for Training")
+        self.capture_button.bind(on_press=self.capture_face)
+
+        self.encrypt_button = Button(text="Encrypt File")
+        self.encrypt_button.bind(on_press=self.show_encrypt_file_chooser)
+
+        self.decrypt_button = Button(text="Decrypt File")
+        self.decrypt_button.bind(on_press=self.show_decrypt_file_chooser)
+
+        self.status_label = Label(text="Status: Ready")
+        
+        self.layout.add_widget(self.capture_button)
+        self.layout.add_widget(self.encrypt_button)
+        self.layout.add_widget(self.decrypt_button)
+        self.layout.add_widget(self.status_label)
+
+        return self.layout
+
+    def speak(self, message):
+        try:
+            engine.say(message)
+            engine.runAndWait()
+        except Exception as e:
+            self.status_label.text = f"Speech error: {e}"
+            print(f"Speech error: {e}")
+
+    def capture_face(self, instance):
+        def capture_thread():
+            try:
+                self.status_label.text = "Capturing face..."
+                self.speak("Please look at the camera for face capture.")
+                
+                video_capture = cv2.VideoCapture(0)
+                if not video_capture.isOpened():
+                    raise Exception("Unable to access the camera.")
+                
+                success, frame = video_capture.read()
+                
+                if success:
+                    # Convert the image from BGR (OpenCV) to RGB (face_recognition)
+                    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    face_locations = face_recognition.face_locations(rgb_frame)
+                    
+                    if face_locations:
+                        face_encoding = face_recognition.face_encodings(rgb_frame, face_locations)[0]
+                        known_face_encodings.append(face_encoding)
+                        
+                        # Save the updated encodings
+                        with open(FACE_ENCODINGS_FILE, "wb") as f:
+                            pickle.dump(known_face_encodings, f)
+                        
+                        self.status_label.text = "Face captured and trained successfully."
+                        self.speak("Face captured and trained successfully.")
+                    else:
+                        self.status_label.text = "No face detected. Please try again."
+                        self.speak("No face detected. Please try again.")
+                else:
+                    raise Exception("Failed to capture image from the camera.")
+                
+                video_capture.release()
+                cv2.destroyAllWindows()
+            
+            except Exception as e:
+                self.status_label.text = f"Face capture error: {e}"
+                self.speak(f"Error capturing face: {e}")
+                print(f"Error during face capture: {e}")
+        
+        threading.Thread(target=capture_thread).start()
+
+    def show_encrypt_file_chooser(self, instance):
+        self.show_file_chooser("encrypt")
+
+    def show_decrypt_file_chooser(self, instance):
+        self.show_file_chooser("decrypt")
+
+    def show_file_chooser(self, action):
+        try:
+            filechooser = FileChooserListView(path=os.getcwd())
+            popup_layout = BoxLayout(orientation='vertical')
+            popup_layout.add_widget(filechooser)
+
+            select_button = Button(text="Select")
+            popup_layout.add_widget(select_button)
+
+            popup = Popup(title="Select a File", content=popup_layout, size_hint=(0.9, 0.9))
+            select_button.bind(on_press=lambda x: self.on_file_selected(filechooser.selection, action, popup))
+            popup.open()
+        except Exception as e:
+            self.status_label.text = f"Error displaying file chooser: {e}"
+            self.speak(f"Error displaying file chooser: {e}")
+            print(f"Error displaying file chooser: {e}")
+
+    def on_file_selected(self, selection, action, popup):
+        if not selection:
+            self.status_label.text = "No file selected."
+            self.speak("No file selected.")
+            return
+
+        selected_file = selection[0]
+        popup.dismiss()
+
+        try:
+            if action == "encrypt":
+                threading.Thread(target=self.encrypt_file, args=(selected_file,)).start()
+            elif action == "decrypt":
+                threading.Thread(target=self.decrypt_file, args=(selected_file,)).start()
+        except Exception as e:
+            self.status_label.text = f"Error processing file: {e}"
+            self.speak(f"Error processing file: {e}")
+            print(f"Error during file selection: {e}")
+
+    def encrypt_file(self, file_path):
+        try:
+            key = load_or_generate_key()  # Load or generate the encryption key
+            cipher = Fernet(key)
+
+            with open(file_path, "rb") as f:
+                data = f.read()
+
+            encrypted_data = cipher.encrypt(data)
+            encrypted_file_path = file_path + ".encrypted"
+
+            with open(encrypted_file_path, "wb") as f:
+                f.write(encrypted_data)
+
+            self.status_label.text = f"File encrypted: {encrypted_file_path}"
+            self.speak("File encrypted successfully.")
+        except Exception as e:
+            self.status_label.text = f"Encryption failed: {e}"
+            self.speak(f"Encryption failed: {e}")
+            print(f"Error during encryption: {e}")
+
+    def decrypt_file(self, file_path):
+        try:
+            self.status_label.text = "Verifying face for decryption..."
+            video_capture = cv2.VideoCapture(0)
+            ret, frame = video_capture.read()
+
+            if not ret:
+                raise Exception("Failed to capture image for face recognition.")
+            
+            face_locations = face_recognition.face_locations(frame)
+            if face_locations:
+                face_encoding = face_recognition.face_encodings(frame, face_locations)[0]
+                matches = face_recognition.compare_faces(known_face_encodings, face_encoding)
+
+                if True in matches:
+                    self.status_label.text = "Face verified! Decrypting..."
+                    self.speak("Face verified. Decrypting the file.")
+                    threading.Thread(target=self.perform_decryption, args=(file_path,)).start()
+                else:
+                    self.status_label.text = "Unauthorized access! Capturing face..."
+                    self.speak("Unauthorized access detected.")
+                    self.capture_unknown_face(frame, file_path)
+            else:
+                raise Exception("No face detected during verification.")
+        except Exception as e:
+            self.status_label.text = f"Decryption failed: {e}"
+            self.speak(f"Decryption failed: {e}")
+            print(f"Error during decryption: {e}")
+
+    def capture_unknown_face(self, frame, file_path):
+        unknown_face_image_path = "unknown_face.jpg"
+        cv2.imwrite(unknown_face_image_path, frame)
+
+        message = f"Unauthorized access attempt for file: {file_path}."
+        send_alert(message, unknown_face_image_path)
+        
+        self.status_label.text = "Unknown face captured and reported."
+        self.speak("Unauthorized access detected, and face has been reported.")
+
+    def perform_decryption(self, file_path):
+        try:
+            key = load_or_generate_key()  # Load the key for decryption
+            cipher = Fernet(key)
+
+            with open(file_path, "rb") as f:
+                encrypted_data = f.read()
+
+            decrypted_file_path = file_path.replace(".encrypted", "_decrypted")
+
+            decrypted_data = cipher.decrypt(encrypted_data)
+
+            with open(decrypted_file_path, "wb") as f:
+                f.write(decrypted_data)
+
+            self.status_label.text = f"File decrypted: {decrypted_file_path}"
+            self.speak("File decrypted successfully.")
+
+        except Exception as e:
+            self.status_label.text = "Decryption failed."
+            self.speak("Decryption failed.")
+            print(f"Error during decryption: {e}")
+
+if __name__ == "__main__":
+    FaceLockApp().run()
