@@ -40,8 +40,8 @@ else:
 KEY_FILE = "secret.key"
 
 # Your Telegram Bot Token and Chat ID (Replace with your actual bot token and chat ID)
-TELEGRAM_BOT_TOKEN = "7546980277:AAH3eG5jcnchvdqT7PYaCA-bH6tINzEojSs"
-CHAT_ID = "1868488937"
+TELEGRAM_BOT_TOKEN = ""
+CHAT_ID = ""
 
 # Initialize Telegram Bot
 bot = Bot(token=TELEGRAM_BOT_TOKEN)
